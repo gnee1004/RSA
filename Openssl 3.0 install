@@ -1,0 +1,8 @@
+Openssl 3.0 설치
+OpenSSL 설치: C:\OpenSSL-Win64에 설치.
+Visual Studio 설정:
+포함 디렉터리: C:\OpenSSL-Win64\include
+라이브러리 디렉터리: C:\OpenSSL-Win64\lib
+추가 종속성: libcrypto.lib
+libcrypto-*.dll (예: libcrypto-3-x64.dll)을 실행 파일 경로에 복사.
+플랫폼: x64로 설정.
