@@ -1,16 +1,14 @@
-// decrypt.c: Decrypts RSA-encrypted data to recover the original message
-// Supports up to 5000 characters (split into 245-byte chunks)
-// Requires OpenSSL 3.0 or higher
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <io.h> // Windows에서 access 함수를 위해 추가
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/bio.h>
-#include <windows.h> // For console settings
+#include <windows.h>
+#include <errno.h> // errno 및 strerror 사용을 위해 추가
 
 #define KEY_LENGTH 2048
 #define HEADER_SIGNATURE "RSAENCv1"
@@ -21,13 +19,23 @@ void handleErrors(void) {
     abort();
 }
 
-// Construct the file path using the user-specified directory
-void get_file_path(char* base_path, char* buffer, size_t buffer_size, const char* filename) {
-    snprintf(buffer, buffer_size, "%s\\%s", base_path, filename);
+void get_file_path(char* buffer, size_t buffer_size, const char* filename) {
+    char exe_path[MAX_PATH];
+    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+    char* last_slash = strrchr(exe_path, '\\');
+    if (last_slash) {
+        *last_slash = '\0';
+    }
+    snprintf(buffer, buffer_size, "%s\\%s", exe_path, filename);
+    printf("DEBUG: Generated path for %s: %s\n", filename, buffer);
+    // Windows에서 _access 사용, F_OK 대신 0 사용
+    if (_access(buffer, 0) != 0) {
+        printf("DEBUG: File %s does not exist or cannot be accessed! Error: %s\n", buffer, strerror(errno));
+    }
 }
 
 int main() {
-    SetConsoleOutputCP(CP_UTF8); // Set console to UTF-8 for potential non-ASCII output
+    SetConsoleOutputCP(CP_UTF8);
 
     EVP_PKEY* pkey = NULL;
     EVP_PKEY_CTX* ctx = NULL;
@@ -38,57 +46,40 @@ int main() {
     size_t encrypted_length, decrypted_length;
     char* final_message = NULL;
     size_t final_length = 0;
-    char base_path[MAX_PATH];
     char priv_path[MAX_PATH], enc_path[MAX_PATH];
 
-    // OpenSSL initialization
     ERR_load_crypto_strings();
     OpenSSL_add_all_algorithms();
 
-    // Get the directory path from user
-    printf("Enter the directory where files are located (e.g., C:\\Path\\To\\Directory):\n");
-    if (fgets(base_path, MAX_PATH, stdin) == NULL) {
-        fprintf(stderr, "Input error for directory path\n");
-        exit(1);
-    }
-    size_t len = strlen(base_path);
-    if (len > 0 && base_path[len - 1] == '\n') {
-        base_path[len - 1] = '\0';
-        len--;
-    }
-    if (len == 0) {
-        fprintf(stderr, "No directory path entered.\n");
-        exit(1);
-    }
+    get_file_path(priv_path, MAX_PATH, "private.pem");
+    get_file_path(enc_path, MAX_PATH, "encrypted.bin");
 
-    // Generate file paths using user-specified directory
-    get_file_path(base_path, priv_path, MAX_PATH, "private.pem");
-    get_file_path(base_path, enc_path, MAX_PATH, "encrypted.bin");
-
-    // Debug: Print file paths
     printf("Attempting to read private key from: %s\n", priv_path);
-    printf("Attempting to read encrypted data from: %s\n", enc_path);
-
-    // Read private key
     priv_bio = BIO_new_file(priv_path, "r");
     if (!priv_bio) {
-        perror("Failed to open private.pem");
+        printf("ERROR: Failed to open private.pem. Error: %s\n", strerror(errno));
         exit(1);
     }
+    printf("DEBUG: Successfully opened private.pem\n");
+
     pkey = PEM_read_bio_PrivateKey(priv_bio, NULL, NULL, NULL);
     if (!pkey) {
-        handleErrors();
-    }
-    BIO_free(priv_bio);
-
-    // Open encrypted data file
-    enc_bio = BIO_new_file(enc_path, "rb");
-    if (!enc_bio) {
-        perror("Failed to open encrypted.bin");
+        printf("ERROR: Failed to read private key from private.pem\n");
+        ERR_print_errors_fp(stderr);
+        BIO_free(priv_bio);
         exit(1);
     }
+    printf("DEBUG: Successfully read private key\n");
+    BIO_free(priv_bio);
 
-    // Verify header signature
+    printf("Attempting to read encrypted data from: %s\n", enc_path);
+    enc_bio = BIO_new_file(enc_path, "rb");
+    if (!enc_bio) {
+        printf("ERROR: Failed to open encrypted.bin. Error: %s\n", strerror(errno));
+        exit(1);
+    }
+    printf("DEBUG: Successfully opened encrypted.bin\n");
+
     if (BIO_read(enc_bio, header, HEADER_LENGTH) != HEADER_LENGTH) {
         fprintf(stderr, "Failed to read header signature\n");
         BIO_free(enc_bio);
@@ -100,7 +91,6 @@ int main() {
         exit(1);
     }
 
-    // Read number of chunks
     uint32_t num_chunks;
     if (BIO_read(enc_bio, &num_chunks, sizeof(uint32_t)) != sizeof(uint32_t)) {
         fprintf(stderr, "Failed to read number of chunks\n");
@@ -109,13 +99,11 @@ int main() {
     }
     printf("Total number of chunks: %u\n", num_chunks);
 
-    // Decrypt
     ctx = EVP_PKEY_CTX_new(pkey, NULL);
     if (!ctx || EVP_PKEY_decrypt_init(ctx) <= 0 || EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING) <= 0) {
         handleErrors();
     }
 
-    // Decrypt each chunk and reassemble the message
     for (uint32_t i = 0; i < num_chunks; i++) {
         encrypted_length = BIO_read(enc_bio, encrypted, KEY_LENGTH / 8);
         if (encrypted_length != KEY_LENGTH / 8) {
@@ -135,11 +123,10 @@ int main() {
             handleErrors();
         }
 
-        // Append decrypted chunk to final message
         final_message = (char*)realloc(final_message, final_length + decrypted_length + 1);
         memcpy(final_message + final_length, decrypted, decrypted_length);
         final_length += decrypted_length;
-        final_message[final_length] = '\0'; // Null-terminate the string
+        final_message[final_length] = '\0';
 
         OPENSSL_free(decrypted);
         decrypted = NULL;
@@ -147,10 +134,8 @@ int main() {
 
     BIO_free(enc_bio);
 
-    // Print the decrypted message
     printf("Decrypted message: %s\n", final_message);
 
-    // Cleanup
     free(final_message);
     EVP_PKEY_free(pkey);
     EVP_PKEY_CTX_free(ctx);
